@@ -831,6 +831,7 @@ int amdgpu_hmm_range_get_pages(struct mmu_interval_notifier *notifier,
 	struct hmm_range *hmm_range = &range->hmm_range;
 	unsigned long *pfns;
 	unsigned long end;
+	unsigned long timeout;
 	int r;
 
 	pfns = kvmalloc_array(npages, sizeof(*pfns), GFP_KERNEL);
@@ -858,6 +859,7 @@ int amdgpu_hmm_range_get_pages(struct mmu_interval_notifier *notifier,
 	end = start + npages * PAGE_SIZE;
 	hmm_range->dev_private_owner = owner;
 
+	timeout = jiffies + msecs_to_jiffies(HMM_RANGE_DEFAULT_TIMEOUT);
 	hmm_range->notifier_seq = mmu_interval_read_begin(notifier);
 	do {
 		hmm_range->end = min(hmm_range->start + max_bytes, end);
@@ -865,7 +867,14 @@ int amdgpu_hmm_range_get_pages(struct mmu_interval_notifier *notifier,
 		pr_debug("hmm range: start = 0x%lx, end = 0x%lx",
 			hmm_range->start, hmm_range->end);
 
-		r = hmm_range_fault(hmm_range);
+		while (true) {
+			r = hmm_range_fault(hmm_range);
+			if (r != -EBUSY)
+				break;
+			if (time_after(jiffies, timeout))
+				break;
+			hmm_range->notifier_seq = mmu_interval_read_begin(notifier);
+		}
 #ifndef HAVE_HMM_DROP_CUSTOMIZABLE_PFN_FORMAT
 		if (unlikely(r <= 0))
 #else
