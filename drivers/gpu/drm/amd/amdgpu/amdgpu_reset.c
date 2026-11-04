@@ -22,6 +22,7 @@
  */
 
 #include "amdgpu_reset.h"
+#include "amdgpu_xgmi.h"
 #include "aldebaran.h"
 #include "sienna_cichlid.h"
 #include "smu_v13_0_10.h"
@@ -312,6 +313,7 @@ struct amdgpu_reset_domain *amdgpu_reset_create_reset_domain(enum amdgpu_reset_d
 	INIT_WORK(&reset_domain->clear, amdgpu_reset_domain_cancel_all_work);
 	atomic_set(&reset_domain->in_gpu_reset, 0);
 	atomic_set(&reset_domain->reset_res, 0);
+	atomic_set(&reset_domain->wedged, 0);
 	init_rwsem(&reset_domain->sem);
 
 	return reset_domain;
@@ -328,6 +330,47 @@ void amdgpu_device_unlock_reset_domain(struct amdgpu_reset_domain *reset_domain)
 {
 	atomic_set(&reset_domain->in_gpu_reset, 0);
 	up_write(&reset_domain->sem);
+}
+
+/*
+ * Bounded-timeout variants used only by amdgpu_device_gpu_recover() itself.
+ * hive_lock is shared across the whole XGMI hive, so it gets a longer,
+ * separately-tunable timeout than the single-device reset_domain->sem to
+ * avoid false-positives against legitimate concurrent hive-wide resets.
+ * Plain mutex/rw_semaphore have no native timed-wait, so these poll trylock.
+ */
+#define AMDGPU_HIVE_LOCK_TIMEOUT_MS	10000
+#define AMDGPU_RESET_SEM_TIMEOUT_MS	5000
+#define AMDGPU_RESET_TRYLOCK_POLL_MS	20
+
+bool amdgpu_device_lock_hive_timeout(struct amdgpu_hive_info *hive)
+{
+	unsigned long deadline = jiffies + msecs_to_jiffies(AMDGPU_HIVE_LOCK_TIMEOUT_MS);
+
+	while (!mutex_trylock(&hive->hive_lock)) {
+		if (time_after(jiffies, deadline))
+			return false;
+		msleep(AMDGPU_RESET_TRYLOCK_POLL_MS);
+	}
+	return true;
+}
+
+void amdgpu_device_unlock_hive(struct amdgpu_hive_info *hive)
+{
+	mutex_unlock(&hive->hive_lock);
+}
+
+bool amdgpu_device_lock_reset_domain_timeout(struct amdgpu_reset_domain *reset_domain)
+{
+	unsigned long deadline = jiffies + msecs_to_jiffies(AMDGPU_RESET_SEM_TIMEOUT_MS);
+
+	while (!down_write_trylock(&reset_domain->sem)) {
+		if (time_after(jiffies, deadline))
+			return false;
+		msleep(AMDGPU_RESET_TRYLOCK_POLL_MS);
+	}
+	atomic_set(&reset_domain->in_gpu_reset, 1);
+	return true;
 }
 
 void amdgpu_reset_get_desc(struct amdgpu_reset_context *rst_ctxt, char *buf,

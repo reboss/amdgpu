@@ -142,6 +142,10 @@ struct amdgpu_reset_domain {
 	atomic_t reset_res;
 	struct work_struct clear;
 	bool drain;
+	/* set when a bounded-timeout reentrancy guard trips; cleared on
+	 * the next successful recovery
+	 */
+	atomic_t wedged;
 };
 
 int amdgpu_reset_init(struct amdgpu_device *adev);
@@ -203,6 +207,14 @@ static inline bool amdgpu_reset_pending(struct amdgpu_reset_domain *domain)
 void amdgpu_device_lock_reset_domain(struct amdgpu_reset_domain *reset_domain);
 
 void amdgpu_device_unlock_reset_domain(struct amdgpu_reset_domain *reset_domain);
+
+struct amdgpu_hive_info;
+
+bool amdgpu_device_lock_hive_timeout(struct amdgpu_hive_info *hive);
+
+void amdgpu_device_unlock_hive(struct amdgpu_hive_info *hive);
+
+bool amdgpu_device_lock_reset_domain_timeout(struct amdgpu_reset_domain *reset_domain);
 
 void amdgpu_reset_get_desc(struct amdgpu_reset_context *rst_ctxt, char *buf,
 			   size_t len);
