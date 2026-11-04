@@ -241,6 +241,27 @@ static ssize_t amdgpu_device_get_pcie_replay_count(struct device *dev,
 static DEVICE_ATTR(pcie_replay_count, 0444,
 		amdgpu_device_get_pcie_replay_count, NULL);
 
+/**
+ * DOC: wedged
+ *
+ * The amdgpu driver provides a sysfs API for reporting whether a GPU
+ * recovery attempt timed out waiting on the hive lock or reset domain
+ * semaphore instead of completing. A value of 1 means the device is
+ * considered wedged and should be drained/rebooted by an external
+ * health check; 0 means no such timeout has been observed since the
+ * last successful recovery.
+ */
+static ssize_t amdgpu_device_get_wedged(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct drm_device *ddev = dev_get_drvdata(dev);
+	struct amdgpu_device *adev = drm_to_adev(ddev);
+
+	return sysfs_emit(buf, "%d\n", atomic_read(&adev->reset_domain->wedged));
+}
+
+static DEVICE_ATTR(wedged, 0444, amdgpu_device_get_wedged, NULL);
+
 static int amdgpu_device_attr_sysfs_init(struct amdgpu_device *adev)
 {
 	int ret = 0;
@@ -248,6 +269,9 @@ static int amdgpu_device_attr_sysfs_init(struct amdgpu_device *adev)
 	if (amdgpu_nbio_is_replay_cnt_supported(adev))
 		ret = sysfs_create_file(&adev->dev->kobj,
 					&dev_attr_pcie_replay_count.attr);
+
+	if (!ret)
+		ret = sysfs_create_file(&adev->dev->kobj, &dev_attr_wedged.attr);
 
 	if (!ret)
 		ret = amdgpu_discovery_mem_reserved_info_sysfs_init(adev);
@@ -260,6 +284,8 @@ static void amdgpu_device_attr_sysfs_fini(struct amdgpu_device *adev)
 	if (amdgpu_nbio_is_replay_cnt_supported(adev))
 		sysfs_remove_file(&adev->dev->kobj,
 				  &dev_attr_pcie_replay_count.attr);
+
+	sysfs_remove_file(&adev->dev->kobj, &dev_attr_wedged.attr);
 
 	amdgpu_discovery_mem_reserved_info_sysfs_fini(adev);
 }
