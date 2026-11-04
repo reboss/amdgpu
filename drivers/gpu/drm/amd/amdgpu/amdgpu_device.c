@@ -5580,6 +5580,18 @@ static void amdgpu_device_recovery_get_reset_lock(struct amdgpu_device *adev,
 	amdgpu_device_lock_reset_domain(tmp_adev->reset_domain);
 }
 
+static bool amdgpu_device_recovery_get_reset_lock_timeout(struct amdgpu_device *adev,
+							   struct list_head *device_list)
+{
+	struct amdgpu_device *tmp_adev = NULL;
+
+	if (list_empty(device_list))
+		return true;
+	tmp_adev =
+		list_first_entry(device_list, struct amdgpu_device, reset_list);
+	return amdgpu_device_lock_reset_domain_timeout(tmp_adev->reset_domain);
+}
+
 static void amdgpu_device_recovery_put_reset_lock(struct amdgpu_device *adev,
 						  struct list_head *device_list)
 {
@@ -5858,8 +5870,13 @@ int amdgpu_device_gpu_recover(struct amdgpu_device *adev,
 
 	if (!amdgpu_sriov_vf(adev))
 		hive = amdgpu_get_xgmi_hive(adev);
-	if (hive)
-		mutex_lock(&hive->hive_lock);
+	if (hive && !amdgpu_device_lock_hive_timeout(hive)) {
+		dev_warn(adev->dev,
+			 "GPU recovery timed out waiting for hive_lock, marking device wedged\n");
+		atomic_set(&adev->reset_domain->wedged, 1);
+		amdgpu_put_xgmi_hive(hive);
+		return -EBUSY;
+	}
 
 	reset_context->job = job;
 	reset_context->hive = hive;
@@ -5877,7 +5894,14 @@ int amdgpu_device_gpu_recover(struct amdgpu_device *adev,
 	amdgpu_ras_pre_reset(adev, &device_list);
 
 	/* We need to lock reset domain only once both for XGMI and single device */
-	amdgpu_device_recovery_get_reset_lock(adev, &device_list);
+	if (!amdgpu_device_recovery_get_reset_lock_timeout(adev, &device_list)) {
+		dev_warn(adev->dev,
+			 "GPU recovery timed out waiting for reset_domain->sem, marking device wedged\n");
+		atomic_set(&adev->reset_domain->wedged, 1);
+		amdgpu_ras_post_reset(adev, &device_list);
+		r = -ETIMEDOUT;
+		goto end_reset;
+	}
 
 	/* unmap all the mappings of doorbell and framebuffer to prevent user space from
 	 * accessing them
@@ -5915,7 +5939,7 @@ reset_unlock:
 	amdgpu_ras_post_reset(adev, &device_list);
 end_reset:
 	if (hive) {
-		mutex_unlock(&hive->hive_lock);
+		amdgpu_device_unlock_hive(hive);
 		amdgpu_put_xgmi_hive(hive);
 	}
 
@@ -5926,6 +5950,8 @@ end_reset:
 
 	if (!r) {
 		struct amdgpu_task_info *ti = NULL;
+
+		atomic_set(&adev->reset_domain->wedged, 0);
 
 		/*
 		 * The job may already be freed at this point via the sched tdr workqueue so
